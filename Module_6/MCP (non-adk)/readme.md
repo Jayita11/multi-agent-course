@@ -37,3 +37,6 @@ df = pd.read_csv(r"/content/multi-agent-course/Module_6/MCP (non-adk)/data/walma
 Run the client script to start querying:
 
 python main.py
+
+## Workflow
+![a2a_mcp](https://github.com/user-attachments/assets/afc4cabe-4a52-44ee-84e3-72dae4198b91)

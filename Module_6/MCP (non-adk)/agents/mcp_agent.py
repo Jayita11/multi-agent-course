@@ -1,4 +1,3 @@
-# More complete implementation of mcp_agent.py
 import asyncio
 import logging
 import uuid
@@ -10,115 +9,93 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParameters
 import os
-import sys
 
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load environment variables if needed
 load_dotenv()
 
 async def get_tools_async():
-    """Gets tools from the MCP Server."""
-    logger.info("Connecting to MCP security-hub server...")
-
-    try:
-        # Connect to your existing MCP server
-        tools, exit_stack = await MCPToolset.from_server(
-            connection_params=StdioServerParameters(
-                command='python',  # Command to run the server
-                args=[
-                    "./servers/server_mcp.py"  # Your existing MCP server
-                ],
-            )
+    """Connect to MCP Server and get tools."""
+    logger.info("Connecting to MCP server...")
+    tools, exit_stack = await MCPToolset.from_server(
+        connection_params=StdioServerParameters(
+            command='python',
+            args=["./servers/server_mcp.py"],
+            env={**os.environ}
         )
-
-        logger.info(f"MCP Toolset created successfully with {len(tools)} tools")
-        return tools, exit_stack
-    except Exception as e:
-        logger.error(f"Failed to connect to MCP server: {e}")
-        raise
-
-async def get_agent_async():
-    """Creates an ADK Agent equipped with tools from the MCP Server."""
-    try:
-        tools, exit_stack = await get_tools_async()
-
-        # Create the agent with MCP tools
-        root_agent = LlmAgent(
-            model='gemini-2.5-pro-preview-03-25',  # Match your model from query_MCP_ADK.py
-            name='sql_analysis_assistant',
-            instruction="""
-            You are an expert SQL analyst working with a walmart_sales database.
-            Use the `query_data` tool to run your SQL queries.
-            Do not use `execute_sql_query`.
-            Make sure all SQL is UPPER CASE and valid for the database.
-            Return only the result of the query, nothing else.
-            """,
-            tools=tools,  # Provide the MCP tools to the ADK agent
-        )
-
-        return root_agent, exit_stack
-    except Exception as e:
-        logger.error(f"Failed to create agent: {e}")
-        raise
+    )
+    logger.info(f"Connected with {len(tools)} tools")
+    return tools, exit_stack
 
 async def run_mcp_agent(query):
-    """Run the MCP agent with a given query and return the response."""
-    session_service = InMemorySessionService()
-    artifacts_service = InMemoryArtifactService()
+    """Run the MCP agent with a query."""
     exit_stack = None
-
+    
     try:
-        # Create a unique session with a UUID
-        session_id = f"session_{uuid.uuid4()}"
+        # Get tools
+        tools, exit_stack = await get_tools_async()
+        
+        # Create agent with better instructions
+        agent = LlmAgent(
+            model='gemini-2.0-flash-exp',
+            name='sql_assistant',
+            instruction="""You are a SQL database assistant with access to the walmart_sales database.
+
+IMPORTANT: You MUST use the tools to interact with the database:
+1. Use list_database_tables() to see available tables
+2. Use get_table_info(table_name="walmart_sales") to see the schema
+3. Use execute_sql_query(sql="YOUR_SQL_HERE") to run queries
+
+Always EXECUTE the query using execute_sql_query tool - don't just show the SQL code.
+Return only the query results, not the SQL itself.""",
+            tools=tools,
+        )
+        
+        # Create session
+        session_service = InMemorySessionService()
         session = session_service.create_session(
             state={},
-            app_name='mcp_sql_analysis_app',
-            user_id='user_1',  # Using your existing USER_ID
-            session_id=session_id
+            app_name='sql_app',
+            user_id='user_1',
+            session_id=f"session_{uuid.uuid4()}"
         )
-
-        logger.info(f"User Query: '{query}'")
-        content = types.Content(role='user', parts=[types.Part(text=query)])
-
-        # Get the agent with MCP tools
-        root_agent, exit_stack = await get_agent_async()
-
-        # Create runner
+        
+        # Run query
         runner = Runner(
-            app_name='mcp_sql_analysis_app',
-            agent=root_agent,
-            artifact_service=artifacts_service,
+            app_name='sql_app',
+            agent=agent,
+            artifact_service=InMemoryArtifactService(),
             session_service=session_service,
         )
-
-        logger.info("Running agent...")
+        
+        content = types.Content(role='user', parts=[types.Part(text=query)])
         result_text = ""
-
-        # Process the query
-        events_async = runner.run_async(
+        
+        async for event in runner.run_async(
             session_id=session.id,
             user_id=session.user_id,
             new_message=content
-        )
-
-        async for event in events_async:
-            logger.debug(f"Event type: {type(event)}")
+        ):
+            # Log all events for debugging
+            logger.info(f"Event type: {type(event).__name__}")
+            
             if event.is_final_response() and event.content and event.content.parts:
                 result_text = event.content.parts[0].text
-
-        return result_text
+                
+        return result_text or "No response generated"
+        
     except Exception as e:
-        logger.error(f"Error running MCP agent: {e}")
+        logger.error(f"Error: {e}", exc_info=True)
         return f"Error: {str(e)}"
+        
     finally:
-        # Clean up MCP connection
         if exit_stack:
-            logger.info("Closing MCP server connection...")
-            try:
-                await exit_stack.aclose()
-            except Exception as e:
-                logger.error(f"Error closing MCP connection: {e}")
+            await exit_stack.aclose()
+
+# Test
+async def main():
+    result = await run_mcp_agent("What is the average weekly sales for department 1 in store 1?")
+    print(f"\nResult:\n{result}\n")
+
+if __name__ == "__main__":
+    asyncio.run(main())
